@@ -1,0 +1,257 @@
+heat_template_version: 2013-05-23
+
+description: >
+  Heat Dynamic Torque template to support SL/CentOS 6x, using only Heat OpenStack-native
+  resource types, and without the requirement for heat-cfntools in the image.
+
+parameters:
+
+  key_name:
+    type: string
+    description : Name of a KeyPair to enable SSH access to the instance
+  instance_type:
+    type: string
+    description: Instance type for master server
+    default: m1.small
+    constraints:
+      - allowed_values: [m1.small, m1.medium, m1.large]
+        description: instance_type must be one of m1.small, m1.medium or m1.large
+  image_id:
+    type: string
+    description: ID of the image to use for the master, default is an SL6.4 image
+    default: 234a8a82-dc7d-4f48-a516-630e6745641b
+  availability_zone:
+    type: string
+    description: The Availability Zone to launch the instance.
+    default: nova
+  volume_size:
+    type: number
+    description: Size of the volume to be created.
+    default: 1
+    constraints:
+      - range: { min: 1, max: 1024000 }
+        description: must be between 1 and 1024000 Gb.
+  nfs_mount_point:
+    type: string
+    description: mount point of cinder volume
+    default: /data
+  ldap_password:
+    type: string
+    description: The LDAP admin account password
+    default: P@ssw0rD
+    hidden: true
+  ladp_base_name:
+    type: string
+    description: The LDAP DN suffix
+    default: nectar
+    constraints:
+      - allowed_pattern: '[a-z0-9]*'
+        description: ladp_base_name must contain only lower-case alphanumeric characters
+  ldap_user:
+    type: string
+    description: username of the normal user (to submit jobs)
+    default: cuser
+  ldap_group:
+    type: string
+    description: group name of the normal user (to submit jobs)
+    default: cuser
+  ldap_user_id:
+    type: string
+    description: uid of the normal user (to submit jobs)
+    default: 10000
+  ldap_group_id:
+    type: string
+    description: gid of the normal user (to submit jobs)
+    default: 10000
+
+resources:
+  master_instance:
+    type: OS::Nova::Server
+    properties:
+      availability_zone: { get_param: availability_zone }
+      image: { get_param: image_id }
+      flavor: { get_param: instance_type }
+      key_name: { get_param: key_name }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+            
+            # Fix hostname
+            yum install -y bind-utils
+            IP=$(/sbin/ifconfig eth0 | grep 'inet addr:' | cut -d: -f2 | cut -d' ' -f1)
+            NAME=$(nslookup $IP | grep "name =" | cut -d" " -f3)
+            HOSTNAME=$(echo $NAME | sed - -e "s/\.$//")
+            if [ ! "$(hostname)" = "$HOSTNAME" ]; then
+                # set hostname in system files
+                /bin/hostname $HOSTNAME
+                echo "$IP $HOSTNAME" >> /etc/hosts
+                /bin/sed -i -e "s/^HOSTNAME=.*$/HOSTNAME=$HOSTNAME/" /etc/sysconfig/network
+            fi
+
+            # Setup LDAP server
+            yum -y install openldap openldap-servers openldap-clients
+            LDAP_PASSWORD=$(slappasswd -s ladp_password -n)
+            echo "olcRootPW: $LDAP_PASSWORD" >> /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
+            /bin/sed -i -e "s/^olcSuffix:.*$/olcSuffix: dc=ladp_base_name/" /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
+            /bin/sed -i -e "s/^olcRootDN:.*$/olcRootDN: cn=Manager,dc=ladp_base_name/" /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
+            /bin/sed -i -e "s/dc=my-domain,dc=com/dc=ladp_base_name/" /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{1\}monitor.ldif
+            echo "olcAccess: {0}to attrs=userPassword by self write by dn.base=\"cn=Manager,dc=ladp_base_name\" write by anonymous auth by * none" >> /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
+            echo "olcAccess: {1}to * by dn.base=\"cn=Manager,dc=ladp_base_name\" write by self write by * read" >> /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
+            chkconfig slapd on
+            service slapd start
+            sleep 3
+            cat << EOF | ldapadd -D cn=Manager,dc=ladp_base_name -w ladp_password
+            dn: dc=ladp_base_name
+            objectClass: dcObject
+            objectClass: organization
+            dc: ladp_base_name
+            o : ladp_base_name
+            
+            dn: ou=users,dc=ladp_base_name
+            objectClass: organizationalUnit
+            ou: users
+
+            dn: ou=groups,dc=ladp_base_name
+            objectClass: organizationalUnit
+            ou: groups
+            
+            dn: cn=ldap_group,ou=groups,dc=ladp_base_name
+            objectClass: posixGroup
+            objectClass: top
+            cn: ldap_group
+            userPassword: {crypt}x
+            gidNumber: ldap_group_id
+            
+            dn: uid=ldap_user,ou=users,dc=ladp_base_name
+            uid: ldap_user
+            cn: ldap_user
+            objectClass: account
+            objectClass: posixAccount
+            objectClass: top
+            objectClass: shadowAccount
+            userPassword: {crypt}!!
+            shadowLastChange: 16126
+            shadowMin: 0
+            shadowMax: 99999
+            shadowWarning: 7
+            loginShell: /bin/bash
+            uidNumber: ldap_user_id
+            gidNumber: ldap_group_id
+            homeDirectory: /home/ldap_user
+            EOF
+            # setup LDAP client
+            yum install -y nss-pam-ldapd
+            authconfig --enableldap --enableldapauth --ldapserver=localhost --ldapbasedn="dc=ladp_base_name" --update
+            sleep 3
+            mkdir /home/ldap_user
+            mkdir /home/ldap_user/.ssh
+            curl http://169.254.169.254/2009-04-04/meta-data/public-keys/0/openssh-key > /home/ldap_user/.ssh/authorized_keys
+            chmod 700 /home/ldap_user/.ssh
+            chmod 600 /home/ldap_user/.ssh/authorized_keys
+            chown ldap_user:ldap_group /home/ldap_user -R
+            
+            # setup torque&maui
+            cat << EOF > /etc/yum.repos.d/epel.repo
+            [epel]
+            name=epel
+            baseurl=http://mirror.internode.on.net/pub/epel/6/\$basearch
+            skip_if_unavailable=1
+            enabled=1
+            sslverify=0
+            gpgcheck=0
+            EOF
+            cat << EOF > /etc/yum.repos.d/UMD_3_base_SL6.repo
+            [UMD_3_base_SL6]
+            name=UMD 3 base SL6
+            baseurl=http://repository.egi.eu/sw/production/umd/3/sl6/\$basearch/base
+            skip_if_unavailable=1
+            enabled=1
+            sslverify=0
+            gpgcheck=0
+            EOF
+            yum install -y torque-server maui-client maui-server munge torque-client
+            /usr/sbin/create-munge-key
+            mkdir -p /var/lib/torque
+            rm -rf /var/spool/torque
+            ln -s /var/lib/torque /var/spool/torque
+            sed -i -e "s!localhost!$HOSTNAME!g"  /var/spool/maui/maui.cfg
+            sed -i -e "s!localhost!$HOSTNAME!g"  /var/lib/torque/server_name
+            /etc/init.d/munge start
+            /etc/init.d/pbs_server start
+            /etc/init.d/maui start
+            chkconfig  maui on
+            chkconfig  pbs_server on
+            chkconfig  munge on
+            sleep 3
+            cat << EOF | qmgr
+            #
+            # Create queues and set their attributes.
+            #
+            #
+            # Create and define queue batch
+            #
+            create queue batch
+            set queue batch queue_type = Execution
+            set queue batch enabled = True
+            set queue batch started = True
+            #
+            # Set server attributes.
+            #
+            set server acl_hosts = localhost
+            set server default_queue = batch
+            set server log_events = 511
+            set server mail_from = adm
+            set server resources_default.cput = 01:00:00
+            set server resources_default.neednodes = 1
+            set server scheduler_iteration = 600
+            set server node_check_rate = 150
+            set server tcp_timeout = 6
+            set server auto_node_np = True
+            set server next_job_number = 0
+            EOF
+            
+            # setup NFS
+            yum install -y nfs-utils xfsprogs
+            /etc/init.d/rpcbind start
+            /etc/init.d/nfslock start
+            /etc/init.d/nfs start
+            mkdir nfs_mount_point
+            #mkfs.xfs /dev/vdc
+            #mount /dev/vdc nfs_mount_point
+            cat << EOF > /etc/exports
+            nfs_mount_point *(rw,no_root_squash,sync)
+            EOF
+            exportfs -r
+
+          params:
+            ladp_base_name: { get_param: ladp_base_name }
+            ladp_password: { get_param: ldap_password }
+            ldap_user: { get_param: ldap_user }
+            ldap_group: { get_param: ldap_group }
+            ldap_user_id: { get_param: ldap_user_id }
+            ldap_group_id: { get_param: ldap_group_id }
+            nfs_mount_point: { get_param: nfs_mount_point }
+#  cinder_volume:
+#    type: OS::Cinder::Volume
+#    properties:
+#      size: { get_param: volume_size }
+#      availability_zone: { get_param: availability_zone }
+#  volume_attachment:
+#    type: OS::Cinder::VolumeAttachment
+#    properties:
+#      volume_id: { get_resource: cinder_volume }
+#      instance_uuid: { get_resource: master_instance }
+#      mountpoint: /dev/vdc
+
+outputs:
+  WebsiteURL:
+    description: URL to login
+    value:
+      str_replace:
+        template: ssh -i key_name.pem ldap_user@host
+        params:
+          host: { get_attr: [master_instance, first_address] }
+          ldap_user: { get_param: ldap_user }
+          key_name: { get_param: key_name }
+          
