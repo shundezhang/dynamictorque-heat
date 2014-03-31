@@ -91,6 +91,7 @@ parameters:
 #    description: static_core_number
 #    default: 10
   cloud_dynamic_core_number:
+    type: number
     description: cloud_dynamic_core_number
     default: 10
 
