@@ -47,22 +47,52 @@ parameters:
     constraints:
       - allowed_pattern: '[a-z0-9]*'
         description: ladp_base_name must contain only lower-case alphanumeric characters
-  ldap_user:
+  ldap_user_name:
     type: string
     description: username of the normal user (to submit jobs)
     default: cuser
-  ldap_group:
+  ldap_group_name:
     type: string
     description: group name of the normal user (to submit jobs)
     default: cuser
   ldap_user_id:
-    type: string
+    type: number
     description: uid of the normal user (to submit jobs)
     default: 10000
   ldap_group_id:
-    type: string
+    type: number
     description: gid of the normal user (to submit jobs)
     default: 10000
+  cloud_user_name_string:
+    type: string
+    description: cloud_user_name
+    default: cloud_user_name
+  cloud_password_string:
+    type: string
+    description: cloud_password
+    default: cloud_password
+  cloud_tenant_name_string:
+    type: string
+    description: cloud_tenant_name
+    default: cloud_tenant_name
+  cloud_key_name_string:
+    type: string
+    description: cloud_key_name
+    default: cloud_key_name
+  cloud_key_content_string:
+    type: string
+    description: cloud_key_content
+    default: cloud_key_content
+  cloud_image_uuid_string:
+    type: string
+    description: cloud_image_uuid
+    default: af8e6b96-1384-4cb6-b212-d6fc7fccc49c
+#  static_core_number:
+#    description: static_core_number
+#    default: 10
+  cloud_dynamic_core_number:
+    description: cloud_dynamic_core_number
+    default: 10
 
 resources:
   master_instance:
@@ -90,7 +120,7 @@ resources:
             fi
 
             # Setup LDAP server
-            yum -y install openldap openldap-servers openldap-clients
+            yum -y install openldap openldap-servers openldap-clients nss-pam-ldapd
             LDAP_PASSWORD=$(slappasswd -s ladp_password -n)
             echo "olcRootPW: $LDAP_PASSWORD" >> /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
             /bin/sed -i -e "s/^olcSuffix:.*$/olcSuffix: dc=ladp_base_name/" /etc/openldap/slapd.d/cn\=config/olcDatabase\=\{2\}bdb.ldif
@@ -116,16 +146,16 @@ resources:
             objectClass: organizationalUnit
             ou: groups
             
-            dn: cn=ldap_group,ou=groups,dc=ladp_base_name
+            dn: cn=ldap_group_name,ou=groups,dc=ladp_base_name
             objectClass: posixGroup
             objectClass: top
-            cn: ldap_group
+            cn: ldap_group_name
             userPassword: {crypt}x
             gidNumber: ldap_group_id
             
-            dn: uid=ldap_user,ou=users,dc=ladp_base_name
-            uid: ldap_user
-            cn: ldap_user
+            dn: uid=ldap_user_name,ou=users,dc=ladp_base_name
+            uid: ldap_user_name
+            cn: ldap_user_name
             objectClass: account
             objectClass: posixAccount
             objectClass: top
@@ -138,18 +168,17 @@ resources:
             loginShell: /bin/bash
             uidNumber: ldap_user_id
             gidNumber: ldap_group_id
-            homeDirectory: /home/ldap_user
+            homeDirectory: /home/ldap_user_name
             EOF
             # setup LDAP client
-            yum install -y nss-pam-ldapd
             authconfig --enableldap --enableldapauth --ldapserver=localhost --ldapbasedn="dc=ladp_base_name" --update
             sleep 3
-            mkdir /home/ldap_user
-            mkdir /home/ldap_user/.ssh
-            curl http://169.254.169.254/2009-04-04/meta-data/public-keys/0/openssh-key > /home/ldap_user/.ssh/authorized_keys
-            chmod 700 /home/ldap_user/.ssh
-            chmod 600 /home/ldap_user/.ssh/authorized_keys
-            chown ldap_user:ldap_group /home/ldap_user -R
+            mkdir /home/ldap_user_name
+            mkdir /home/ldap_user_name/.ssh
+            curl http://169.254.169.254/2009-04-04/meta-data/public-keys/0/openssh-key > /home/ldap_user_name/.ssh/authorized_keys
+            chmod 700 /home/ldap_user_name/.ssh
+            chmod 600 /home/ldap_user_name/.ssh/authorized_keys
+            chown ldap_user_name:ldap_group_name /home/ldap_user_name -R
             
             # setup torque&maui
             cat << EOF > /etc/yum.repos.d/epel.repo
@@ -223,15 +252,150 @@ resources:
             nfs_mount_point *(rw,no_root_squash,sync)
             EOF
             exportfs -r
+            
+            # setup dynamic torque
+            yum install -y git python-pip gcc-c++ python-devel
+            cd /opt
+            git clone https://github.com/shundezhang/dynamictorque.git
+            cd dynamictorque
+            pip install python-novaclient
+            cp scripts/dynamictorque /etc/init.d/
+            mkdir /var/log/dynamictorque
+            mkdir /etc/dynamictorque
+            cat << EOF > /etc/dynamictorque/cloud_key_name_string.pem
+            cloud_key_content_string
+            EOF
+            chmod 600 /etc/dynamictorque/cloud_key_name_string.pem
+            cat << EOF > /etc/dynamictorque/dynamic_torque.conf 
+            [global]
+            job_mode: active
+            
+            [cloud]
+            cloud_username: cloud_user_name_string
+            cloud_password: cloud_password_string
+            cloud_tenant_name: cloud_tenant_name_string
+            cloud_image_uuid: cloud_image_uuid_string
+            cloud_auth_url: https://keystone.rc.nectar.org.au:5000/v2.0/
+            cloud_key_name: cloud_key_name_string
+            cloud_security_groups: default
+            cloud_private_key_location: /etc/dynamictorque/cloud_key_name_string.pem
+            cloud_availability_zone: availability_zone_name
+            cloud_vm_prefix: pbsdynwn-
+            cloud_vm_init_file:
+            cloud_vm_userdata_file: /etc/dynamictorque/userdata.sh
+            static_core_number: 1:ppn=2:CLOUD
+            max_number_cores_per_vm: 2
+            dynamic_core_number: cloud_dynamic_core_number
+            cloud_vm_init_finish_file: /var/run/vmpool/alive
+            
+            [torque]
+            torque_queue_to_monitor: batch
+            node_property: cloud
+            node_location_property: CLOUD:availability_zone_name
+            default_location: 0
+            
+            [logging]
+            log_level: DEBUG
+            log_location: /var/log/dynamictorque/dynamictorque.log
+            EOF
+            cat << EOF > /etc/dynamictorque/userdata.sh
+            #!/bin/bash
+            
+            /bin/sed -i 's/^SELINUX=.*\$/SELINUX=disabled/' /etc/selinux/config
+            /usr/sbin/setenforce Permissive
+            
+            PBS_SERVER=$HOSTNAME
+            
+            # figure out correct hostname
+            IP=\$(/sbin/ifconfig eth0 | grep 'inet addr:' | cut -d: -f2 | cut -d' ' -f1)
+            NAME=\$(nslookup \$IP | grep "name =" | cut -d" " -f3)
+            HOSTNAME=\$(echo \$NAME | sed - -e "s/\.\$//")
+            if [ ! "\$(hostname)" = "\$HOSTNAME" ]; then
+                # set hostname in system files
+                /bin/hostname \$HOSTNAME
+                echo "\$IP \$HOSTNAME" >> /etc/hosts
+                /bin/sed -i -e "s/^HOSTNAME=.*\$/HOSTNAME=\$HOSTNAME/" /etc/sysconfig/network
+            fi
+            # setup ldap client
+            yum -y install openldap-clients nss-pam-ldapd
+            authconfig --enableldap --enableldapauth --ldapserver=$HOSTNAME --ldapbasedn="dc=ladp_base_name" --update
+            cat << YUMREPO > /etc/yum.repos.d/epel.repo
+            [epel]
+            name=epel
+            baseurl=http://mirror.internode.on.net/pub/epel/6/\\\$basearch
+            skip_if_unavailable=1
+            enabled=1
+            sslverify=0
+            gpgcheck=0
+            YUMREPO
+            cat << YUMREPO > /etc/yum.repos.d/UMD_3_base_SL6.repo
+            [UMD_3_base_SL6]
+            name=UMD 3 base SL6
+            baseurl=http://repository.egi.eu/sw/production/umd/3/sl6/\\\$basearch/base
+            skip_if_unavailable=1
+            enabled=1
+            sslverify=0
+            gpgcheck=0
+            YUMREPO
+            yum install -y torque-mom
+            echo "\$PBS_SERVER" > /etc/torque/server_name
+            cat << MOMCONF > /etc/torque/mom/config
+            # Configuration for pbs_mom.
+            \\\$pbsserver \$PBS_SERVER
+            \\\$logevent    255
+            \\\$usecp *:nfs_mount_point/ nfs_mount_point/
+            MOMCONF
+            cat << MOMPRO > /var/lib/torque/mom_priv/prologue
+            #!/bin/sh
+            
+            # Check the home directory of the user exists before job starts
+            if [ ! -d /home/\\\$2 ]
+            then
+            mkdir -p /home/\\\$2
+            chown \\\$2:\\\$3 /home/\\\$2
+            fi
+            
+            exit 0
+            MOMPRO
+            cat << MOMENV >> /var/lib/torque/pbs_environment
+            PBSCOREDUMP=yes
+            MOMENV
+            chmod 500 /var/lib/torque/mom_priv/prologue
+            /etc/init.d/pbs_mom start
+            /sbin/chkconfig pbs_mom on
+            #setup NFS client
+            yum install -y nfs-utils
+            #sed -i '/Domain/c\Domain = COEPP.ORG.AU' /etc/idmapd.conf
+            #service rpcidmapd restart
+            mkdir nfs_mount_point
+            chmod 777 nfs_mount_point
+            mount -t nfs4 -o rsize=32768,wsize=32768,noatime $HOSTNAME:nfs_mount_point nfs_mount_point
+            
+            /etc/init.d/dynamictorque start
+
+            if [ ! -d /var/run/vmpool ]; then
+              mkdir -p /var/run/vmpool
+            fi
+            touch /var/run/vmpool/alive
+            EOF
 
           params:
+            image_id: { get_param: image_id }
+            availability_zone_name: { get_param: availability_zone }
             ladp_base_name: { get_param: ladp_base_name }
             ladp_password: { get_param: ldap_password }
-            ldap_user: { get_param: ldap_user }
-            ldap_group: { get_param: ldap_group }
             ldap_user_id: { get_param: ldap_user_id }
             ldap_group_id: { get_param: ldap_group_id }
+            ldap_user_name: { get_param: ldap_user_name }
+            ldap_group_name: { get_param: ldap_group_name }
             nfs_mount_point: { get_param: nfs_mount_point }
+            cloud_user_name_string: { get_param: cloud_user_name_string }
+            cloud_password_string: { get_param: cloud_password_string }
+            cloud_tenant_name_string: { get_param: cloud_tenant_name_string }
+            cloud_key_name_string: { get_param: cloud_key_name_string }
+            cloud_key_content_string: { get_param: cloud_key_content_string }
+            cloud_image_uuid_string: { get_param: cloud_image_uuid_string }
+            cloud_dynamic_core_number: { get_param: cloud_dynamic_core_number }
 #  cinder_volume:
 #    type: OS::Cinder::Volume
 #    properties:
@@ -249,9 +413,7 @@ outputs:
     description: URL to login
     value:
       str_replace:
-        template: ssh -i key_name.pem ldap_user@host
+        template: http://host
         params:
           host: { get_attr: [master_instance, first_address] }
-          ldap_user: { get_param: ldap_user }
-          key_name: { get_param: key_name }
           
