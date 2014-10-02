@@ -371,14 +371,14 @@ resources:
             mkdir nfs_mount_point
             chmod 777 nfs_mount_point
             mount -t nfs4 -o rsize=32768,wsize=32768,noatime $HOSTNAME:nfs_mount_point nfs_mount_point
-            
-            /etc/init.d/dynamictorque start
 
             if [ ! -d /var/run/vmpool ]; then
               mkdir -p /var/run/vmpool
             fi
             touch /var/run/vmpool/alive
             EOF
+            
+            /etc/init.d/dynamictorque start
 
           params:
             image_id: { get_param: image_id }
